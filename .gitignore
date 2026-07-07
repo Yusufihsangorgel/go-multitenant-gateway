@@ -1,0 +1,8 @@
+/gateway
+*.exe
+*.out
+.env
+.DS_Store
+.claude/
+.idea/
+.vscode/
