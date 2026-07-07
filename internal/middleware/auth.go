@@ -16,11 +16,13 @@ import (
 // touching the gateway. The verification point stays here either way: auth is a
 // gateway concern, checked once, before any handler runs.
 func Auth(secret []byte) fiber.Handler {
+	const prefix = "Bearer "
 	return func(c *fiber.Ctx) error {
-		raw := strings.TrimPrefix(c.Get("Authorization"), "Bearer ")
-		if raw == "" || raw == c.Get("Authorization") {
+		auth := c.Get("Authorization")
+		if !strings.HasPrefix(auth, prefix) {
 			return fiber.NewError(fiber.StatusUnauthorized, "missing bearer token")
 		}
+		raw := strings.TrimPrefix(auth, prefix)
 
 		token, err := jwt.Parse(raw, func(t *jwt.Token) (any, error) {
 			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
