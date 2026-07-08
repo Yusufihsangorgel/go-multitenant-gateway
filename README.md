@@ -9,6 +9,60 @@ production that serves a fleet of apps from one binary — the real one has many
 more modules and routes. This repo keeps the pattern and drops the product code,
 so it stays small enough to read in one sitting.
 
+## Architecture
+
+Every request runs the same chain. `recover` wraps everything; health is mounted
+*before* the chain so probes need no tenant or token; every other route resolves
+a tenant, spends against that tenant's rate budget, and passes auth before a
+module handler ever runs.
+
+```mermaid
+---
+config:
+  look: handDrawn
+---
+flowchart TB
+    REQ(["Incoming HTTP request"]) --> REC["recover<br/>catch panics &rarr; 500"]
+    REC --> HEALTH{"path is /health/* ?"}
+    HEALTH -->|"yes (mounted before the chain)"| HZ["health module &rarr; 200, no auth"]
+    HEALTH -->|no| T["Tenant middleware<br/>X-Tenant header &rarr; ctx, 400 if missing"]
+    T --> RL["RateLimit middleware<br/>per-tenant fixed window, 429 if over"]
+    RL --> AUTH["Auth middleware<br/>verify Bearer JWT &rarr; userID, 401 if invalid"]
+    AUTH --> ROUTER["Module router<br/>match path prefix"]
+    ROUTER --> H["Module handler<br/>reads tenant + user from ctx"]
+```
+
+One binary hosts every product module behind that chain. A module owns a path
+prefix and is listed once; adding a product does not add a service. All tenants
+share one Postgres, each isolated in its own schema — resolved at the edge and
+carried on the context, so a handler never picks a schema from raw input.
+
+```mermaid
+---
+config:
+  look: handDrawn
+---
+flowchart LR
+    subgraph BIN["Single binary — one deploy, one log stream"]
+      direction TB
+      CHAIN["shared middleware chain<br/>tenant &middot; rate limit &middot; auth"]
+      CHAIN --> M1["health module"]
+      CHAIN --> M2["notes module"]
+      CHAIN --> M3["… ~17 modules<br/>in the production fleet"]
+    end
+    M2 --> PG
+    M3 --> PG
+    subgraph PG["One shared Postgres — schema per tenant"]
+      direction TB
+      SA["tenant_acme"]
+      SB["tenant_globex"]
+      SC["tenant_…"]
+    end
+```
+
+The tradeoffs behind these choices are written up in
+[ARCHITECTURE.md](ARCHITECTURE.md).
+
 ## Why single-binary, multi-tenant?
 
 For a small team (or one operator), the dominant cost is not compute — it is the
