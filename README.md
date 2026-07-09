@@ -9,6 +9,9 @@ production that serves a fleet of apps from one binary — the real one has many
 more modules and routes. This repo keeps the pattern and drops the product code,
 so it stays small enough to read in one sitting.
 
+
+> **Background:** I wrote up the design decisions behind this — the case for and against one binary for many products — [on my blog](https://yusufihsangorgel.github.io/2026/07/07/one-go-binary-for-and-against.html).
+
 ## Architecture
 
 Every request runs the same chain. `recover` wraps everything; health is mounted
