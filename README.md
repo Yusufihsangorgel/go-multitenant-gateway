@@ -95,6 +95,30 @@ curl -H "X-Tenant: acme" -H "Authorization: Bearer <jwt>" localhost:8080/notes/
 
 A request with no tenant is `400`; with a tenant but no/invalid token, `401`.
 
+## Run it with Postgres and Redis
+
+By default everything above runs in memory, so the quickstart needs no
+services. Set `DATABASE_URL` and/or `REDIS_URL` to switch on the production
+wiring: notes live schema-per-tenant in Postgres, and the rate limiter counts
+in Redis so several replicas spend from one budget.
+
+```bash
+docker compose up -d
+
+DATABASE_URL='postgres://postgres:postgres@localhost:5432/gateway?sslmode=disable' \
+REDIS_URL='redis://localhost:6379/0' \
+SEED_TENANTS=acme,globex \
+go run ./cmd/gateway
+```
+
+At boot the gateway registers every tenant in `SEED_TENANTS`, creates their
+schemas and runs the embedded per-schema migrations for everything in the
+registry. Tenants exist only through that registry (seeded here, or via
+`migrate.EnsureTenant`). In this mode the tenant middleware resolves each
+request's schema *from* the registry (with a short-lived cache in front), so a
+request for an unregistered tenant is rejected with `404` before any SQL runs,
+and no request input ever reaches SQL as an identifier.
+
 ## Layout
 
 ```
@@ -103,6 +127,8 @@ internal/server        wires the middleware chain + modules (tested here)
 internal/middleware    tenant resolution · per-tenant rate limit · JWT auth
 internal/modules       the Module interface + example modules (health, notes)
 internal/tenant        tenant identity carried on the request context
+internal/db            pgx pool + the transaction primitive that pins search_path to one tenant schema
+internal/migrate       per-schema migration runner over embedded SQL, with a ledger in each schema
 internal/config        env-driven config
 ```
 
@@ -117,17 +143,29 @@ shape a real one takes.
 | `PORT` | `8080` | listen port |
 | `JWT_SECRET` | `dev-secret-change-me` | HS256 secret (see note below) |
 | `RATE_PER_MINUTE` | `120` | per-tenant request budget |
+| `DATABASE_URL` | *(empty)* | Postgres DSN; empty keeps the in-memory notes store |
+| `REDIS_URL` | *(empty)* | Redis URL; empty keeps the in-memory rate limiter |
+| `DB_MAX_CONNS` | `8` | pgx pool cap |
+| `SEED_TENANTS` | *(empty)* | comma-separated tenant IDs registered and migrated at boot |
 
 ## What this reference simplifies (and what production does)
 
 - **Auth:** here, HS256 with a shared secret, so it runs with one env var. In
   production the gateway verifies RS256 tokens against the auth service's public
   keys (JWKS), so it holds no signing material and keys can rotate independently.
-- **Rate limit:** here, in-memory, fine for one instance. With multiple replicas
-  the counter lives in Redis so replicas share one budget.
-- **Data:** handlers read the tenant's Postgres schema from the context. This
-  repo has no database wired in; the point is the isolation boundary, not the
-  driver.
+  This is the one piece this repo still simplifies.
+- **Rate limit:** in-memory by default, fine for one instance. Set `REDIS_URL`
+  and the counter moves to Redis (fixed window, pipelined `INCR` + `EXPIRE NX`),
+  so every replica spends from one budget. On a store error the limiter fails
+  open: availability over strict limiting, the tradeoff ARCHITECTURE.md
+  describes. Both limiters ship in `internal/middleware`.
+- **Data:** in-memory by default. Set `DATABASE_URL` and the notes module runs
+  against Postgres, schema per tenant: the schema itself comes from the tenants
+  registry rather than the raw header, every query goes through a transaction
+  whose `search_path` is pinned to exactly the tenant's schema (`internal/db`),
+  and a hand-rolled runner (`internal/migrate`) migrates each schema with its
+  own ledger, so tenants can be created and migrated independently — including
+  by several replicas at once (per-schema advisory lock).
 
 Each of these is called out at the point in the code where it matters.
 
@@ -137,9 +175,29 @@ Each of these is called out at the point in the code where it matters.
 go test ./...
 ```
 
-The middleware chain is covered end-to-end in `internal/server`: health without
-auth, tenant required, token required, valid request passes, tampered token
-rejected.
+Unit tests run with no services: the middleware chain end-to-end in
+`internal/server` (health without auth, tenant required, token required, valid
+request passes, tampered token rejected), identifier sanitization, the
+registry cache, migration loading and ordering, the fixed-window limiter
+against a fake counter, and the notes module on its in-memory store.
+
+Integration tests are gated on env and skip when it is absent:
+
+```bash
+docker compose up -d
+
+TEST_DATABASE_URL='postgres://postgres:postgres@localhost:5432/gateway?sslmode=disable' \
+TEST_REDIS_URL='redis://localhost:6379/0' \
+go test -race ./...
+```
+
+They prove the claims that matter: two schemas answering the same unqualified
+query with different rows, `search_path` never leaking across pooled
+connections under concurrency, migration idempotence, concurrent runners on
+the same schema (the rolling-deploy case), halfway-failure recovery, the full
+app rejecting unregistered tenants before any SQL, and the Redis limiter
+sharing one budget across two app instances and resetting after the window.
+CI runs the full set against postgres:16 and redis:7 service containers.
 
 ## License
 

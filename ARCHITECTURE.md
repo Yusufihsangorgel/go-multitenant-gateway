@@ -26,8 +26,9 @@ thing to tune.
 **The cost:** blast radius. A runaway query or a bad migration can affect
 neighbors, and you cannot move one tenant to its own hardware without work.
 Mitigation: the tenant is resolved once at the edge and carried on the context;
-handlers never choose a schema from raw input, so a header can't point a query
-at an arbitrary schema. A tenant that outgrows the shared database graduates to
+handlers never choose a schema from raw input, and the schema itself comes from
+a registry lookup, so a header can't point a query at an arbitrary schema —
+only at a tenant somebody deliberately registered. A tenant that outgrows the shared database graduates to
 its own — the schema boundary is the seam you cut along.
 
 ## Auth verified at the edge, via public keys
@@ -35,8 +36,14 @@ its own — the schema boundary is the seam you cut along.
 The gateway verifies JWTs; it does not issue them. In production it checks RS256
 signatures against the auth service's public keys (JWKS), so the gateway holds
 no signing material. Keys can rotate, and auth can redeploy, without touching
-the gateway. The verification happens once, in middleware, before any handler —
-auth is a gateway concern, not a per-handler one.
+the gateway. The verification happens once, in middleware, before any handler
+runs: auth is a gateway concern, not a per-handler one.
+
+This is the one piece the reference in this repo deliberately simplifies. The
+committed `internal/middleware/auth.go` verifies an HS256 shared secret so the
+gateway runs from a single env var. The chain position and the verify-once-at-
+the-edge principle are identical to the JWKS design above; only the key
+mechanism differs.
 
 **The cost:** a JWKS fetch/cache path and clock-skew handling. Cheap, and worth
 it to keep signing keys in exactly one place.
@@ -59,6 +66,9 @@ and a per-product queue namespace so one noisy product cannot starve the others.
 
 **The cost:** eventual consistency in the UX (an email is *queued*, not *sent*)
 and one more moving part. Worth it: the request path stays fast and predictable.
+
+(This part is not modeled in this reference — the repo stops at the request
+path. It is here because the decision belongs to the same architecture.)
 
 ## What I would change first
 
