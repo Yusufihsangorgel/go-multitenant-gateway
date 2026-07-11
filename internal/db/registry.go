@@ -76,9 +76,26 @@ func (r *Registry) Schema(ctx context.Context, id string) (schema string, found 
 
 	r.mu.Lock()
 	if len(r.cache) >= registryCacheMax {
-		r.cache = map[string]registryEntry{}
+		r.evictLocked(now)
 	}
 	r.cache[id] = registryEntry{schema: schema, found: found, expires: now.Add(r.ttl)}
 	r.mu.Unlock()
 	return schema, found, nil
+}
+
+// evictLocked keeps the cache bounded without letting a flood of unique junk
+// tenant IDs evict live tenants. It drops the entries that are safe to lose,
+// expired ones and negative (not-found) ones that only absorb repeat junk
+// headers, and keeps live positive resolutions so real tenants stay cached
+// instead of being pushed back onto the database. If nothing is evictable the
+// cache is reset to stay bounded. Callers hold r.mu.
+func (r *Registry) evictLocked(now time.Time) {
+	for k, e := range r.cache {
+		if !e.found || now.After(e.expires) {
+			delete(r.cache, k)
+		}
+	}
+	if len(r.cache) >= registryCacheMax {
+		r.cache = map[string]registryEntry{}
+	}
 }

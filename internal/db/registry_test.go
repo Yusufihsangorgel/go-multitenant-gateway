@@ -119,6 +119,51 @@ func TestRegistryDoesNotCacheErrors(t *testing.T) {
 	}
 }
 
+// mapQuerier resolves per-id: known ids return their schema, everything else
+// is a miss. It counts calls so a test can tell a cache hit from a re-query.
+type mapQuerier struct {
+	schemas map[string]string
+	calls   int
+}
+
+func (q *mapQuerier) QueryRow(_ context.Context, _ string, args ...any) pgx.Row {
+	q.calls++
+	id, _ := args[0].(string)
+	if s, ok := q.schemas[id]; ok {
+		return fakeRow{schema: s}
+	}
+	return fakeRow{err: pgx.ErrNoRows}
+}
+
+func TestRegistryKeepsLiveTenantsUnderJunkFlood(t *testing.T) {
+	q := &mapQuerier{schemas: map[string]string{"acme": "tenant_acme"}}
+	r := NewRegistry(q, time.Minute)
+	ctx := context.Background()
+
+	// Warm the cache with a real tenant.
+	if _, found, err := r.Schema(ctx, "acme"); err != nil || !found {
+		t.Fatalf("warm acme: found=%v err=%v", found, err)
+	}
+
+	// Flood the cache with unique junk IDs, well past the cap.
+	for i := 0; i < registryCacheMax+10; i++ {
+		if _, _, err := r.Schema(ctx, fmt.Sprintf("junk_%d", i)); err != nil {
+			t.Fatalf("junk id %d: %v", i, err)
+		}
+	}
+
+	// The live tenant must still resolve from cache. If the junk flood evicted
+	// it, this lookup issues another query and real traffic goes back to the
+	// database.
+	before := q.calls
+	if _, found, err := r.Schema(ctx, "acme"); err != nil || !found {
+		t.Fatalf("acme after flood: found=%v err=%v", found, err)
+	}
+	if q.calls != before {
+		t.Fatalf("acme was re-queried after a junk flood (calls %d -> %d); live tenants must survive eviction", before, q.calls)
+	}
+}
+
 func TestRegistryCacheIsBounded(t *testing.T) {
 	q := &fakeQuerier{err: pgx.ErrNoRows}
 	r := NewRegistry(q, time.Minute)
