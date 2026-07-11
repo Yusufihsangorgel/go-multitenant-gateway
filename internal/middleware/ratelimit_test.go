@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -69,5 +70,21 @@ func TestRateLimitIsPerTenant(t *testing.T) {
 	// Tenant B keeps its own window, so A hitting the ceiling must not affect it.
 	if got := hit(t, app, "tenant-b"); got != http.StatusOK {
 		t.Fatalf("tenant-b first request = %d, want %d", got, http.StatusOK)
+	}
+}
+
+// A flood of unique tenant IDs (in quickstart the header is unvalidated) must
+// not grow the window map without bound. Every id here is distinct and hit
+// within one window, so none expire on their own; the limiter has to cap the
+// map itself.
+func TestRateLimiterBoundsWindowMap(t *testing.T) {
+	l := newRateLimiter(1)
+
+	for i := 0; i < maxRateWindows+5000; i++ {
+		l.allow(fmt.Sprintf("junk-%d", i))
+	}
+
+	if got := l.size(); got > maxRateWindows {
+		t.Fatalf("window map grew to %d entries, cap is %d", got, maxRateWindows)
 	}
 }
