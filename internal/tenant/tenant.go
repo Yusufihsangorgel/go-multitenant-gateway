@@ -30,9 +30,11 @@ func From(c *fiber.Ctx) (Tenant, bool) {
 	return t, ok
 }
 
-// SchemaFor maps a tenant ID to its Postgres schema name. Kept trivial here on
-// purpose; in production this is a validated lookup so a header can never point
-// a query at an arbitrary schema.
+// SchemaFor maps a tenant ID to its Postgres schema name. This convention is
+// used where there is no registry to ask: the in-memory default, and boot-time
+// seeding, which registers exactly this name. When Postgres is on, the serving
+// path does not derive schemas at all; middleware resolves them from the
+// tenant registry, so a header can never point a query at an arbitrary schema.
 func SchemaFor(id string) string {
 	return "tenant_" + id
 }

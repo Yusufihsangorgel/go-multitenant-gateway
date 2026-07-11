@@ -1,12 +1,17 @@
 package server
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/gofiber/fiber/v2"
 
 	"github.com/Yusufihsangorgel/go-multitenant-gateway/internal/config"
 )
@@ -25,13 +30,19 @@ func token(sub string) string {
 	return header + "." + payload + "." + enc(mac.Sum(nil))
 }
 
+// do builds the app with empty DATABASE_URL and REDIS_URL, so these tests
+// exercise the same wiring the binary runs without touching any service.
 func do(t *testing.T, method, path string, headers map[string]string) int {
 	t.Helper()
+	a, err := New(context.Background(), testCfg)
+	if err != nil {
+		t.Fatalf("build app: %v", err)
+	}
 	req := httptest.NewRequest(method, path, nil)
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := New(testCfg).Test(req)
+	resp, err := a.Fiber.Test(req)
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
@@ -68,5 +79,39 @@ func TestTamperedTokenRejected(t *testing.T) {
 	h := map[string]string{"X-Tenant": "acme", "Authorization": "Bearer " + token("user-1") + "x"}
 	if got := do(t, http.MethodGet, "/notes/", h); got != http.StatusUnauthorized {
 		t.Fatalf("tampered token = %d, want 401", got)
+	}
+}
+
+// TestErrorHandlerHidesBackendDetail pins the information-disclosure boundary:
+// deliberate fiber errors keep their message, everything else (a store error,
+// a panic recover turned into an error) becomes a generic 500. Backend error
+// text carries schema names and SQL detail that must never reach a client.
+func TestErrorHandlerHidesBackendDetail(t *testing.T) {
+	app := fiber.New(fiber.Config{ErrorHandler: errorHandler})
+	app.Get("/boom", func(c *fiber.Ctx) error {
+		return fmt.Errorf(`list notes for tenant acme: relation "notes" does not exist (SQLSTATE 42P01)`)
+	})
+	app.Get("/known", func(c *fiber.Ctx) error {
+		return fiber.NewError(fiber.StatusNotFound, "unknown tenant")
+	})
+
+	get := func(path string) (int, string) {
+		t.Helper()
+		resp, err := app.Test(httptest.NewRequest(http.MethodGet, path, nil))
+		if err != nil {
+			t.Fatalf("request %s failed: %v", path, err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		return resp.StatusCode, string(body)
+	}
+
+	if code, body := get("/boom"); code != http.StatusInternalServerError || body != "internal error" {
+		t.Fatalf("raw error surfaced as %d %q, want 500 %q", code, body, "internal error")
+	}
+	if code, body := get("/known"); code != http.StatusNotFound || body != "unknown tenant" {
+		t.Fatalf("fiber error surfaced as %d %q, want 404 %q", code, body, "unknown tenant")
 	}
 }

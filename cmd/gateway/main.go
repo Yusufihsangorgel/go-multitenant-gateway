@@ -10,7 +10,12 @@
 package main
 
 import (
+	"context"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/Yusufihsangorgel/go-multitenant-gateway/internal/config"
 	"github.com/Yusufihsangorgel/go-multitenant-gateway/internal/server"
@@ -18,10 +23,32 @@ import (
 
 func main() {
 	cfg := config.Load()
-	app := server.New(cfg)
 
-	log.Printf("gateway listening on :%s", cfg.Port)
-	if err := app.Listen(":" + cfg.Port); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	app, err := server.New(ctx, cfg)
+	if err != nil {
 		log.Fatal(err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- app.Listen(":" + cfg.Port) }()
+	log.Printf("gateway listening on :%s", cfg.Port)
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			log.Fatal(err)
+		}
+	case <-ctx.Done():
+		// A signal arrived. Drain in-flight requests for up to 10 seconds,
+		// then close the database pool and the Redis client.
+		log.Print("shutting down")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := app.Shutdown(shutdownCtx); err != nil {
+			log.Fatal(err)
+		}
 	}
 }
